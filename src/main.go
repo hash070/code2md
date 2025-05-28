@@ -34,6 +34,8 @@ var (
 		"node_modules",
 		".env",
 		".env.local",
+		"package-lock.json",
+		"pnpm-lock.yaml",
 		"*.log",
 		"dist",
 		"build",
@@ -68,14 +70,201 @@ type Config struct {
 	ignoreRules []string
 }
 
+// GitIgnore 表示一个.gitignore解析器
+type GitIgnore struct {
+	patterns []GitIgnorePattern
+	root     string
+}
+
+// GitIgnorePattern 表示一个忽略模式
+type GitIgnorePattern struct {
+	pattern    string
+	isNegation bool
+	isDir      bool
+	isRoot     bool
+}
+
+// NewGitIgnore 创建一个新的GitIgnore解析器
+func NewGitIgnore(root string, patterns []string) *GitIgnore {
+	gi := &GitIgnore{
+		root:     root,
+		patterns: make([]GitIgnorePattern, 0, len(patterns)),
+	}
+
+	for _, pattern := range patterns {
+		if p := parseGitIgnorePattern(pattern); p.pattern != "" {
+			gi.patterns = append(gi.patterns, p)
+		}
+	}
+
+	return gi
+}
+
+// parseGitIgnorePattern 解析单个.gitignore模式
+func parseGitIgnorePattern(pattern string) GitIgnorePattern {
+	p := GitIgnorePattern{}
+
+	// 去除空白
+	pattern = strings.TrimSpace(pattern)
+
+	// 空行或注释
+	if pattern == "" || strings.HasPrefix(pattern, "#") {
+		return p
+	}
+
+	// 处理否定模式
+	if strings.HasPrefix(pattern, "!") {
+		p.isNegation = true
+		pattern = pattern[1:]
+	}
+
+	// 处理根目录模式
+	if strings.HasPrefix(pattern, "/") {
+		p.isRoot = true
+		pattern = pattern[1:]
+	}
+
+	// 处理目录模式
+	if strings.HasSuffix(pattern, "/") {
+		p.isDir = true
+		pattern = strings.TrimSuffix(pattern, "/")
+	}
+
+	p.pattern = pattern
+	return p
+}
+
+// ShouldIgnore 检查文件是否应该被忽略
+func (gi *GitIgnore) ShouldIgnore(path string, isDir bool) bool {
+	// 规范化路径
+	path = filepath.ToSlash(path)
+
+	// 默认不忽略
+	ignored := false
+
+	// 按顺序检查每个模式
+	for _, p := range gi.patterns {
+		if p.isDir && !isDir {
+			// 目录模式不匹配文件
+			continue
+		}
+
+		if matches := gi.matchPattern(p, path, isDir); matches {
+			// 否定模式会取消忽略
+			ignored = !p.isNegation
+		}
+	}
+
+	return ignored
+}
+
+// matchPattern 检查路径是否匹配模式
+func (gi *GitIgnore) matchPattern(p GitIgnorePattern, path string, isDir bool) bool {
+	pattern := p.pattern
+
+	// 处理特殊情况
+	if pattern == "" {
+		return false
+	}
+
+	// 如果模式包含/，则需要完整路径匹配
+	if strings.Contains(pattern, "/") {
+		// 如果是根目录模式，直接匹配
+		if p.isRoot {
+			return gi.matchPath(pattern, path)
+		}
+		// 否则可以匹配路径的任何部分
+		return gi.matchPath(pattern, path) || gi.matchPathSuffix(pattern, path)
+	}
+
+	// 简单模式可以匹配路径的任何部分
+	parts := strings.Split(path, "/")
+	for _, part := range parts {
+		if matched, _ := filepath.Match(pattern, part); matched {
+			return true
+		}
+	}
+
+	// 如果是根目录模式，只匹配第一级
+	if p.isRoot {
+		firstPart := strings.Split(path, "/")[0]
+		matched, _ := filepath.Match(pattern, firstPart)
+		return matched
+	}
+
+	return false
+}
+
+// matchPath 完整路径匹配
+func (gi *GitIgnore) matchPath(pattern, path string) bool {
+	// 直接匹配
+	if matched, _ := filepath.Match(pattern, path); matched {
+		return true
+	}
+
+	// 如果模式是目录，检查路径是否在该目录下
+	if strings.HasPrefix(path, pattern+"/") {
+		return true
+	}
+
+	// 支持 ** 通配符
+	if strings.Contains(pattern, "**") {
+		return gi.matchDoubleWildcard(pattern, path)
+	}
+
+	return false
+}
+
+// matchPathSuffix 匹配路径后缀
+func (gi *GitIgnore) matchPathSuffix(pattern, path string) bool {
+	// 检查路径的每个后缀
+	parts := strings.Split(path, "/")
+	for i := range parts {
+		suffix := strings.Join(parts[i:], "/")
+		if matched, _ := filepath.Match(pattern, suffix); matched {
+			return true
+		}
+		// 如果模式是目录，检查后缀是否在该目录下
+		if strings.HasPrefix(suffix, pattern+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// matchDoubleWildcard 处理 ** 通配符
+func (gi *GitIgnore) matchDoubleWildcard(pattern, path string) bool {
+	// 简化实现：将 ** 替换为 *
+	pattern = strings.ReplaceAll(pattern, "**", "*")
+	matched, _ := filepath.Match(pattern, path)
+	return matched
+}
+
+// 集成到主程序的辅助函数
+func shouldIgnoreWithGitIgnore(path string, isDir bool, gi *GitIgnore, patterns []string) bool {
+	// 先检查GitIgnore
+	if gi != nil && gi.ShouldIgnore(path, isDir) {
+		return true
+	}
+
+	// 再检查其他内置模式
+	for _, pattern := range patterns {
+		if strings.Contains(path, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func main() {
 	config := parseFlags()
 
 	// 加载忽略规则
-	ignorePatterns := loadIgnorePatterns(config.sourceDir)
+	gitIgnore, defaultPatterns := loadIgnorePatterns(config.sourceDir)
 
 	// 收集所有文件
-	files, err := collectFiles(config.sourceDir, ignorePatterns)
+	files, err := collectFiles(config.sourceDir, gitIgnore, defaultPatterns)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error collecting files: %v\n", err)
 		os.Exit(1)
@@ -143,23 +332,30 @@ func parseSize(sizeStr string) int64 {
 	return size * multiplier
 }
 
-func loadIgnorePatterns(dir string) []string {
+func loadIgnorePatterns(dir string) (*GitIgnore, []string) {
+	// 复制默认模式
 	patterns := make([]string, len(defaultIgnorePatterns))
 	copy(patterns, defaultIgnorePatterns)
+
+	// 收集所有gitignore模式
+	var gitPatterns []string
 
 	// 读取.gitignore
 	gitignorePath := filepath.Join(dir, ".gitignore")
 	if patterns2 := readIgnoreFile(gitignorePath); patterns2 != nil {
-		patterns = append(patterns, patterns2...)
+		gitPatterns = append(gitPatterns, patterns2...)
 	}
 
 	// 读取.code2mdignore
 	code2mdignorePath := filepath.Join(dir, ".code2mdignore")
 	if patterns2 := readIgnoreFile(code2mdignorePath); patterns2 != nil {
-		patterns = append(patterns, patterns2...)
+		gitPatterns = append(gitPatterns, patterns2...)
 	}
 
-	return patterns
+	// 创建GitIgnore解析器
+	gi := NewGitIgnore(dir, gitPatterns)
+
+	return gi, patterns
 }
 
 func readIgnoreFile(path string) []string {
@@ -180,22 +376,7 @@ func readIgnoreFile(path string) []string {
 	return patterns
 }
 
-func shouldIgnore(path string, patterns []string) bool {
-	// 检查每个忽略模式
-	for _, pattern := range patterns {
-		// 简单的模式匹配（可以后续改进为更复杂的glob匹配）
-		if matched, _ := filepath.Match(pattern, filepath.Base(path)); matched {
-			return true
-		}
-		// 检查路径中是否包含该模式
-		if strings.Contains(path, pattern) {
-			return true
-		}
-	}
-	return false
-}
-
-func collectFiles(rootDir string, ignorePatterns []string) ([]string, error) {
+func collectFiles(rootDir string, gitIgnore *GitIgnore, defaultPatterns []string) ([]string, error) {
 	var files []string
 
 	err := filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
@@ -212,8 +393,13 @@ func collectFiles(rootDir string, ignorePatterns []string) ([]string, error) {
 		// 统一使用正斜杠
 		relPath = filepath.ToSlash(relPath)
 
+		// 跳过根目录
+		if relPath == "." {
+			return nil
+		}
+
 		// 检查是否应该忽略
-		if shouldIgnore(relPath, ignorePatterns) {
+		if shouldIgnoreWithGitIgnore(relPath, info.IsDir(), gitIgnore, defaultPatterns) {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
