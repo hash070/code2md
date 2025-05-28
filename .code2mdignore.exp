@@ -1,0 +1,31 @@
+# code2md 自定义排除规则示例
+# 将此文件重命名为 .code2mdignore 并放在项目根目录
+
+# 排除特定文件
+secrets.json
+config.local.js
+.env.production
+
+# 排除特定目录
+tests/fixtures/
+docs/generated/
+cache/
+
+# 排除特定类型的文件
+*.min.js
+*.min.css
+*-lock.json
+*.map
+
+# 排除大型数据文件
+data/*.csv
+data/*.json
+datasets/
+
+# 排除生成的文档
+docs/*.pdf
+api-docs/
+
+# 临时排除正在开发的功能
+feature-x/
+experimental/
